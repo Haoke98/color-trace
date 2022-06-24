@@ -36,20 +36,21 @@ potrace_选项 = ''
 
 版本 = '1.01'
 
-import os, sys
-import shutil
-import subprocess
 import argparse
-from glob import iglob
 import functools
 import multiprocessing
+import os
 import queue
+import re
+import shlex
+import shutil
+import subprocess
+import sys
 import tempfile
 import time
-import shlex
-import re
-from pprint import pprint
+from glob import iglob
 
+from PIL import Image
 
 from svg_stack import svg_stack
 
@@ -60,7 +61,7 @@ def 汇报(*args, level=1):
         print(*args)
 
 
-def 处理命令(命令, stdinput=None, stdout_=False, stderr_=False):
+def handle_command(命令, stdinput=None, stdout_=False, stderr_=False):
     """在后台 shell 中运行命令，返回 stdout 和/或 stderr
 
     返回 stdout, stderr 或一个数组（stdout, stderr），取决于 stdout, stderr 参数
@@ -104,14 +105,14 @@ def 重缩放(源, 目标, 缩放, 滤镜='lanczos'):
     if 缩放 == 1.0:  # 不缩放。检查格式
         if os.path.splitext(源)[1].lower() not in ['.png']: # 非 png 则转格式
             命令 = f'{ImageMagick_convert_命令} "{源}" "{目标}"'
-            处理命令(命令)
+            handle_command(命令)
         else: # png 格式则直接复制
             shutil.copyfile(源, 目标)
     else:
         命令 = '{convert} "{src}" -filter {filter} -resize {resize}% "{dest}"'.format(
             convert=ImageMagick_convert_命令, src=源, filter=滤镜, resize=缩放 * 100,
             dest=目标)
-        处理命令(命令)
+        handle_command(命令)
 
 def 量化缩减图片颜色(源, 量化目标, 颜色数, 算法='mc', 拟色=None):
     """将源图像量化到指定数量的颜色，保存到量化目标
@@ -146,7 +147,7 @@ def 量化缩减图片颜色(源, 量化目标, 颜色数, 算法='mc', 拟色=N
             raise ValueError("对 'mc' 量化方法使用了错误的拟色类型：'{0}' ".format(拟色))
         # 因为 pngquant 不能保存到中文路径，所以使用 stdin/stdout 操作 pngquant
         命令 = f'{pngquant_命令} --force {拟色选项} {颜色数} - < "{源}" > "{量化目标}"'
-        stdoutput = 处理命令(命令)
+        stdoutput = handle_command(命令)
 
     elif 算法 == 'as':  # adaptive spatial subdivision 自适应空间细分
         if 拟色 is None:
@@ -157,7 +158,7 @@ def 量化缩减图片颜色(源, 量化目标, 颜色数, 算法='mc', 拟色=N
             raise ValueError("Invalid dither type '{0}' for 'as' quantization".format(拟色))
         命令 = '{convert} "{src}" -dither {dither} -colors {colors} "{dest}"'.format(
             convert=ImageMagick_convert_命令, src=源, dither=拟色选项, colors=颜色数, dest=量化目标)
-        处理命令(命令)
+        handle_command(命令)
 
     elif 算法 == 'nq':  # neuquant
         ext = "~quant.png"
@@ -170,7 +171,7 @@ def 量化缩减图片颜色(源, 量化目标, 颜色数, 算法='mc', 拟色=N
             raise ValueError("Invalid dither type '{0}' for 'nq' quantization".format(拟色))
         命令 = '"{pngnq}" -f {dither}-d "{destdir}" -n {colors} -e {ext} "{src}"'.format(
             pngnq=pngnq_路径, dither=拟色选项, destdir=destdir, colors=颜色数, ext=ext, src=源)
-        处理命令(命令)
+        handle_command(命令)
         # 因为 pngnq 不支持保存到自定义目录，所以先输出文件到当前目录，再移动到量化目标
         旧输出 = os.path.join(destdir, os.path.splitext(os.path.basename(源))[0] + ext)
         os.rename(旧输出, 量化目标)
@@ -201,7 +202,7 @@ def 用调色板对图片重映射(源, 重映射目标, 调色板图像, 拟色
 
     # magick convert "src.png" -dither None -remap "platte.png" "output.png"
     命令 = f'{ImageMagick_convert_命令} "{源}" -dither {拟色选项} -remap "{调色板图像}" "{重映射目标}"'
-    处理命令(命令)
+    handle_command(命令)
 
 
 
@@ -209,7 +210,7 @@ def 制作颜色表(源图像):
     """从源图像得到特征色，返回 #rrggbb 16进制颜色"""
 
     命令 = f'{ImageMagick_convert_命令} "{源图像}"  -unique-colors txt:-'
-    stdoutput = 处理命令(命令, stdout_=True) # 这个输出中包含了颜色
+    stdoutput = handle_command(命令, stdout_=True)  # 这个输出中包含了颜色
 
     正则模式 = '#[0-9A-F]{6}'
     IM输出 = stdoutput.decode(sys.getfilesystemencoding())
@@ -326,7 +327,7 @@ def 孤立颜色(源, 目标临时文件, 目标图层, 目标颜色, 调色板,
         if len(命令中间) >= 命令行最长 or (i == last_iteration and 命令中间):
             命令 = 命令前缀 + 命令中间 + 命令后缀
 
-            stdoutput = 处理命令(命令, stdinput=stdinput, stdout_=True)
+            stdoutput = handle_command(命令, stdinput=stdinput, stdout_=True)
             stdinput = stdoutput
             命令中间 = ''  # reset
 
@@ -334,22 +335,24 @@ def 孤立颜色(源, 目标临时文件, 目标图层, 目标颜色, 调色板,
     命令 = '{convert} "{src}" -fill "{fillbg}" -opaque "{colorbg}" -fill "{fillfg}" -opaque "{colorfg}" "{dest}"'.format(
         convert=ImageMagick_convert_命令, src=目标临时文件, fillbg=背景白, colorbg=背景接近白,
         fillfg=前景黑, colorfg=前景接近黑, dest=目标图层)
-    处理命令(命令, stdinput=stdinput)
+    handle_command(命令, stdinput=stdinput)
 
 
 def 使用颜色填充(源, 目标):
     命令 = '{convert} "{src}" -fill "{color}" +opaque none "{dest}"'.format(
         convert=ImageMagick_convert_命令, src=源, color="#000000", dest=目标)
-    处理命令(命令)
+    handle_command(命令)
 
 
-def 得到宽度(源):
+def get_width(src: str):
     """返回头像宽多少像素"""
-    命令 = '{identify} -ping -format "%w" "{src}"'.format(
-        identify=ImageMagick_identify_命令, src=源)
-    stdoutput = 处理命令(命令, stdout_=True)
-    宽 = int(stdoutput)
-    return 宽
+    img = Image.open(src)
+    print(img.width, img.height, img.size)
+    cmd = '{identify} -ping -format "%w" "{src}"'.format(identify=ImageMagick_identify_命令, src=src)
+    print(f"COMMAND IS:[{cmd}]")
+    std_output = handle_command(cmd, stdout_=True)
+    width = int(std_output)
+    return width
 
 
 def 描摹(源, 描摹目标, 输出颜色, 抑制斑点像素数=2, 平滑转角=1.0, 优化路径=0.2, 宽度=None, 高度=None, 分辨率=None):
@@ -375,7 +378,7 @@ def 描摹(源, 描摹目标, 输出颜色, 抑制斑点像素数=2, 平滑转�
                 {宽度参数} {高度参数} {分辨率参数} "{源}"'''
     汇报(命令)
 
-    处理命令(命令)
+    handle_command(命令)
 
 
 def 检查范围(min, max, typefunc, typename, strval):
@@ -500,7 +503,7 @@ def 队列1_任务(队列2, 总数, 图层, 设置, findex, 输入文件, output
 
         # 得到图像宽度
         # 优先使用用户设置的宽度，如果没设置，那就去获得原来的宽度
-        宽度 = 设置['width'] if 设置['width'] else f'{得到宽度(输入文件)}pt'
+        宽度 = 设置['width'] if 设置['width'] else f'{get_width(输入文件)}pt'
         高度 = 设置['height']
         分辨率 = 设置['resolution']
 
